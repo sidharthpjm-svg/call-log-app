@@ -53,7 +53,7 @@ This is the base for the rest of the FDE training:
 
 ## Live links
 
-- Frontend: _add your Vercel URL_
+- Frontend: https://call-log-app-pi.vercel.app
 - API: https://call-log-app-ox2d.onrender.com (interactive docs at `/docs`)
 
 ## Features
