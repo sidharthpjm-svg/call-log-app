@@ -4,3 +4,6 @@ node_modules/
 dist/
 __pycache__/
 .DS_Store
+
+# Backups of earlier versions
+*.bak

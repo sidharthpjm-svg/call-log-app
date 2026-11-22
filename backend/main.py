@@ -1,5 +1,8 @@
+import json
 import os
 import time
+import uuid
+from datetime import timedelta
 from contextlib import asynccontextmanager
 from typing import Literal, Optional
 
@@ -7,6 +10,7 @@ import psycopg
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Query, Response
 from fastapi.middleware.cors import CORSMiddleware
+from livekit import api as livekit_api
 from psycopg.rows import dict_row
 from pydantic import BaseModel, Field
 
@@ -16,6 +20,15 @@ DATABASE_URL = os.environ["DATABASE_URL"]
 
 # The only outcomes a screening call can have
 Outcome = Literal["shortlisted", "callback", "rejected", "no answer"]
+
+# LiveKit settings for "Call from the dashboard". Keep the key and secret private.
+LIVEKIT_URL = os.getenv("LIVEKIT_URL", "")
+LIVEKIT_API_KEY = os.getenv("LIVEKIT_API_KEY", "")
+LIVEKIT_API_SECRET = os.getenv("LIVEKIT_API_SECRET", "")
+# The voice agent's name, and which deployment to send it from
+# (empty = the agent deployed on LiveKit Cloud; "dev-..." = one running on a laptop with `lk agent dev`)
+LIVEKIT_AGENT_NAME = os.getenv("LIVEKIT_AGENT_NAME", "screening-agent")
+LIVEKIT_AGENT_DEPLOYMENT = os.getenv("LIVEKIT_AGENT_DEPLOYMENT", "")
 
 
 def get_db():
@@ -84,6 +97,12 @@ class CallIn(BaseModel):
     notice_period_days: Optional[int] = Field(default=None, ge=0, le=365)
     duration_seconds: Optional[int] = Field(default=None, ge=0)
     notes: Optional[str] = None
+
+
+class VoiceSessionIn(BaseModel):
+    candidate_name: str = Field(min_length=1, max_length=100)
+    role: str = Field(min_length=1, max_length=100)
+    phone: Optional[str] = Field(default=None, pattern=r"^\+?[0-9]{10,15}$")
 
 
 class CallUpdate(BaseModel):
@@ -179,6 +198,42 @@ def delete_call(call_id: int):
     if not deleted:
         raise HTTPException(status_code=404, detail="Call not found")
     return Response(status_code=204)
+
+
+@app.post("/voice/session")
+def start_voice_session(body: VoiceSessionIn):
+    """Create a private LiveKit room for a screening call and a ticket (token) to join it.
+
+    The token also tells LiveKit to send the screening agent (Riya) into the room,
+    with the candidate's details as metadata, so she greets them by name.
+    """
+    if not (LIVEKIT_URL and LIVEKIT_API_KEY and LIVEKIT_API_SECRET):
+        raise HTTPException(status_code=503, detail="Voice calls are not set up on this server")
+
+    room_name = f"screening-{uuid.uuid4().hex[:10]}"
+    candidate = {
+        "candidate_name": body.candidate_name,
+        "role": body.role,
+        "phone": body.phone,
+        "source": "dashboard",
+    }
+    dispatch = livekit_api.RoomAgentDispatch(
+        agent_name=LIVEKIT_AGENT_NAME,
+        metadata=json.dumps(candidate),
+    )
+    if LIVEKIT_AGENT_DEPLOYMENT:
+        dispatch.deployment = LIVEKIT_AGENT_DEPLOYMENT
+
+    token = (
+        livekit_api.AccessToken(LIVEKIT_API_KEY, LIVEKIT_API_SECRET)
+        .with_identity(f"candidate-{uuid.uuid4().hex[:8]}")
+        .with_name(body.candidate_name)
+        .with_ttl(timedelta(minutes=15))
+        .with_grants(livekit_api.VideoGrants(room_join=True, room=room_name))
+        .with_room_config(livekit_api.RoomConfiguration(agents=[dispatch]))
+        .to_jwt()
+    )
+    return {"server_url": LIVEKIT_URL, "participant_token": token, "room_name": room_name}
 
 
 @app.get("/stats")
